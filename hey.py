@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+
+"""
+A simple script for querying a Google Custom Search Engine API and then
+processing the results via the OpenAI Chat API. The intent is to create
+a light-weight alternative to the Google Assistant and New Bing Search
+that is usable from the command line.
+
+Required environment variables:
+    - GCSE_ID: The ID of the Google Custom Search Engine.
+    - GCSE_API_KEY: The API key for the Google Custom Search Engine.
+    - OPENAI_API_KEY: The API key for the OpenAI API.
+
+Optional environment variables:
+    - HEY_NAME: The name of the bot. Defaults to the system hostname.
+    - HEY_USER: The name of the user. Defaults to "User".
+    - HEY_TONE: The tone of the bot. Defaults to "friendly".
+    - OPENAI_MODEL: The OpenAI engine to use. Defaults to "gpt-3.5-turbo-0301".
+
+Dependencies:
+    - openai
+    - requests
+
+Usage:
+    hey <query_string> [--no-openai | -n]
+"""
+
+import sys
+import os
+import socket
+import logging
+import argparse
+
+import openai
+from openai.openai_object import OpenAIObject
+import requests
+
+# Set up environment variables.
+GCSE_ID = os.environ.get("GCSE_ID")
+GCSE_API_KEY = os.environ.get("GCSE_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-3.5-turbo-0301")
+HEY_NAME = os.environ.get("HEY_NAME", socket.gethostname().split(".")[0].capitalize())
+HEY_USER = os.environ.get("HEY_USER", "User")
+HEY_TONE = os.environ.get("HEY_TONE", "friendly")
+
+# Set up logging.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("hey.log"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+
+
+# Simple Yellow ANSI color for printing.
+def pr_yellow(skk, end='\n'): print("\033[93m{}\033[00m".format(skk), end=end)
+
+
+def query(query_string: str):
+    """
+    Queries the Google Custom Search Engine API and returns the resulting JSON.
+    """
+    # Use the requests library to make a request. Separate the URL from the query_string parameters.
+    url = f"https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": GCSE_API_KEY,
+        "cx": GCSE_ID,
+        "q": query_string,
+        "hl": "en",
+        "num": 3,
+        "lr": "lang_en",
+    }
+    response = requests.get(url, params=params, auth=("user", GCSE_API_KEY))
+    return response.json()
+
+
+def chat(user_input: str, context: list[str]) -> OpenAIObject:
+    """
+    Queries the OpenAI API and returns the resulting OpenAI object response stream.
+    """
+    # Create the "messages" list with the initial system context.
+    messages = [{
+        "role": "system",
+        "content": f"You are {HEY_NAME} and you are a {HEY_TONE} AI assistant. You are talking to {HEY_USER}.",
+    }]
+    # Add the GCSE query context to the "messages" list as user messages.
+    messages += [{
+        "role": "user",
+        "content": f"Here's some information on the subject I'm about to ask about. \"{result}\"",
+    } for result in context]
+    # Add the user input to the "messages" list as a user message.
+    messages.append({
+        "role": "user",
+        "content": user_input,
+    })
+    # Use the OpenAI Chat API to generate a contextual response.
+    response = openai.ChatCompletion.create(
+        model=OPENAI_MODEL,
+        messages=messages,
+        temperature=0.1,
+        stream=True,
+    )
+    return response
+
+
+def main(*args):
+    """
+    Entry point for the script.
+    """
+    parser = argparse.ArgumentParser(description="A simple search assistant.")
+    parser.add_argument("input", type=str, help="The user input to the assistant.")
+    parser.add_argument("--no-openai", "-n", action="store_true", help="Do not use the OpenAI API.")
+    args = parser.parse_args(args)
+    # Query the Google Custom Search Engine API with the user input. Extract the item snippets and display links.
+    logging.debug(f"Querying Google Custom Search Engine API with \"{args.input}\".")
+    results = query(args.input)
+
+    if args.no_openai:
+        # If the OpenAI API is disabled, return the snippets.
+        logging.info("Disabling OpenAI API. Raw results will be printed.")
+        # Format and print results. Snippets are formatted as "1. <snippet> (<link>)".
+        pr_yellow(f"Here are the top {len(results['items'])} results for \"{args.input}\".")
+        for i, item in enumerate(results["items"]):
+            pr_yellow(f"\t{i + 1}. {item['snippet']} ({item['link']})")
+    else:
+        # If the OpenAI API is enabled, use the snippets as context for the OpenAI API.
+        snippets = [item['snippet'] for item in results['items']]
+        logging.debug(f"Querying OpenAI API with \"{args.input}\".")
+        response = chat(args.input, snippets)
+        # Iterate the response stream and print the results.
+        for chunk in response:
+            # Extract the response from the chunk, default if no content is present.
+            delta = chunk['choices'][0]['delta'].get("content", "")
+            pr_yellow(delta, end="")
+        # Cite the response sources.
+        pr_yellow("\nCitations:")
+        for i, item in enumerate(results["items"]):
+            pr_yellow(f"\t{i + 1}. ({item['link']})")
+
+
+if __name__ == "__main__":
+    main(*sys.argv[1:])
